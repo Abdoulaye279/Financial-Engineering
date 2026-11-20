@@ -1,6 +1,6 @@
 # Financial Engineering
 
-Three quant finance projects.
+My quant finance projects.
 
 ## 1. Black-Scholes applied to the S&P 500 (`black-scholes-sp500/`)
 
