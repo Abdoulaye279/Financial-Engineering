@@ -6,6 +6,14 @@ from scipy import stats, optimize
 from scipy.special import xlogy
 
 
+def load_close(path):
+    # daily close from the csv files of this repo (dates have a time zone, keep only the day)
+    import pandas as pd
+    df = pd.read_csv(path)
+    df["Date"] = pd.to_datetime(df["Date"].str[:10])
+    return df.set_index("Date")["Close"]
+
+
 def var_es_normal(r, alpha=0.99):
     mu, sd = r.mean(), r.std(ddof=1)
     z = stats.norm.ppf(1 - alpha)
@@ -105,4 +113,107 @@ def backtest(r, alpha=0.99, window=1000, refit=250):
             out["es_evt"][t] = -mu + st * evt_es
     df = pd.DataFrame(out, index=r.index)
     df.insert(0, "ret", v)
+    return df.iloc[window:]
+
+
+def dcc_filter(Z, a, b):
+    # DCC(1,1) correlations from standardised residuals Z (days x 2); out[t] uses Z up to t-1,
+    # the last one is the forecast for the next day
+    Qbar = np.corrcoef(Z.T)
+    Q = Qbar.copy()
+    out = np.empty((len(Z) + 1, 2, 2))
+    for t in range(len(Z) + 1):
+        d = np.sqrt(np.diag(Q))
+        out[t] = Q / np.outer(d, d)
+        if t < len(Z):
+            Q = (1 - a - b) * Qbar + a * np.outer(Z[t], Z[t]) + b * Q
+    return out
+
+
+def dcc_fit(Z):
+    # maximum likelihood of the correlation part of a DCC(1,1), for 2 assets
+    def nll(p):
+        a, b = p
+        if a < 0 or b < 0 or a + b >= 0.999:
+            return 1e10
+        r = dcc_filter(Z, a, b)[:-1, 0, 1]
+        det = 1 - r ** 2
+        q = (Z[:, 0] ** 2 - 2 * r * Z[:, 0] * Z[:, 1] + Z[:, 1] ** 2) / det
+        return 0.5 * np.sum(np.log(det) + q - (Z ** 2).sum(axis=1))
+    return optimize.minimize(nll, [0.03, 0.95], method="Nelder-Mead").x
+
+
+def t_copula_fit(X):
+    # Student-t copula on the ranks of X (days x 2): rho from Kendall's tau, degrees of freedom by maximum likelihood
+    U = stats.rankdata(X, axis=0) / (len(X) + 1)
+    rho = np.sin(np.pi / 2 * stats.kendalltau(X[:, 0], X[:, 1])[0])
+    C = np.array([[1, rho], [rho, 1]])
+
+    def nll(nu):
+        x = stats.t.ppf(U, nu)
+        return -(stats.multivariate_t(shape=C, df=nu).logpdf(x).sum() - stats.t.logpdf(x, nu).sum())
+    nu = optimize.minimize_scalar(nll, bounds=(2.1, 100), method="bounded").x
+    return rho, nu
+
+
+def es_contributions(S, w, alpha=0.99):
+    # share of the historical ES brought by each asset: its average weighted loss on the worst portfolio days
+    S, w = np.asarray(S), np.asarray(w)
+    p = S @ w
+    tail = S[p <= np.quantile(p, 1 - alpha)]
+    c = -(tail * w).mean(axis=0)
+    return c / c.sum()
+
+
+def equal_risk_weights(S, alpha=0.99):
+    # 2 assets: weight of the second asset so that both bring half of the ES
+    w2 = optimize.brentq(lambda x: es_contributions(S, [1 - x, x], alpha)[1] - 0.5, 0.01, 0.99)
+    return np.array([1 - w2, w2])
+
+
+def portfolio_backtest(R, w, alpha=0.99, window=1000, refit=250, lam=0.94):
+    # two portfolio models on a matrix of daily log returns R (days x assets) with weights w:
+    # - ewma: RiskMetrics covariance (lambda 0.94) and a normal VaR/ES
+    # - mfhs: one GARCH per asset, then the past vectors of standardised residuals are
+    #   rescaled by today's volatilities and turned into portfolio returns (keeps the joint tails)
+    # - dcc: same as mfhs, but the residuals are first decorrelated with their own DCC correlation
+    #   and then given today's DCC correlation, so the dependence also changes every day (2 assets)
+    import pandas as pd
+    X, w = np.asarray(R), np.asarray(w)
+    T, n = X.shape
+    out = {k: np.full(T, np.nan) for k in ["var_ewma", "es_ewma", "var_mfhs", "es_mfhs", "var_dcc", "es_dcc"]}
+    zq = stats.norm.ppf(1 - alpha)
+    S = np.cov(X[:250].T)
+    for t in range(T):
+        if t >= window:
+            sp = np.sqrt(w @ S @ w)
+            out["var_ewma"][t], out["es_ewma"][t] = -sp * zq, sp * stats.norm.pdf(zq) / (1 - alpha)
+        S = lam * S + (1 - lam) * np.outer(X[t], X[t])
+    for start in range(window, T, refit):
+        end = min(start + refit, T)
+        past = X[start - window:start]
+        mu = past.mean(axis=0)
+        sig = np.empty((end - start + window, n))
+        for i in range(n):
+            sig[:, i] = np.sqrt(garch_filter(X[start - window:end, i] - mu[i], *garch_fit(past[:, i]))[:-1])
+        Z = (past - mu) / sig[:window]
+        if n == 2:
+            a, b = dcc_fit(Z)
+            Zall = (X[start - window:end] - mu) / sig
+            Rt = dcc_filter(Zall, a, b)
+            # remove each past day's own correlation (Cholesky), leaving uncorrelated shocks
+            E = np.array([np.linalg.solve(np.linalg.cholesky(Rt[s]), Z[s]) for s in range(window)])
+        for t in range(start, end):
+            st = sig[t - start + window]
+            port = np.log1p((np.exp(mu + Z * st) - 1) @ w)
+            q = np.quantile(port, 1 - alpha)
+            out["var_mfhs"][t], out["es_mfhs"][t] = -q, -port[port <= q].mean()
+            if n == 2:
+                Zt = E @ np.linalg.cholesky(Rt[t - start + window]).T   # give today's correlation
+                port = np.log1p((np.exp(mu + Zt * st) - 1) @ w)
+                q = np.quantile(port, 1 - alpha)
+                out["var_dcc"][t], out["es_dcc"][t] = -q, -port[port <= q].mean()
+    out = {k: v for k, v in out.items() if n == 2 or "dcc" not in k}
+    df = pd.DataFrame(out, index=R.index if hasattr(R, "index") else None)
+    df.insert(0, "ret", np.log1p((np.exp(X) - 1) @ w))
     return df.iloc[window:]

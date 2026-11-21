@@ -1,7 +1,7 @@
 import numpy as np
 import pandas as pd
 from scipy import stats
-from risk import evt_tail, var_es_normal, var_es_hist, garch_filter, garch_fit, kupiec, christoffersen, backtest
+from risk import dcc_filter, dcc_fit, t_copula_fit, es_contributions, equal_risk_weights, portfolio_backtest, evt_tail, var_es_normal, var_es_hist, garch_filter, garch_fit, kupiec, christoffersen, backtest
 
 rng = np.random.default_rng(0)
 
@@ -59,3 +59,41 @@ def test_backtest_on_garch_data():
     assert 0.003 < rate < 0.02    # close to 1% when the model is right
     for m in ["normal", "hist", "garch", "fhs", "evt"]:
         assert (bt[f"es_{m}"] >= bt[f"var_{m}"]).all()
+
+
+def test_portfolio_backtest():
+    # two correlated GARCH assets: both models should give about 1% breaches and ES above VaR
+    n = 3000
+    a, b = simulate_garch(n), simulate_garch(n)
+    R = pd.DataFrame({"x": a, "y": 0.6 * a + 0.8 * b}, index=pd.bdate_range("2000-01-03", periods=n))
+    bt = portfolio_backtest(R, [0.5, 0.5], window=1000, refit=250)
+    assert len(bt) == 2000 and not bt.isna().any().any()
+    for m in ["ewma", "mfhs", "dcc"]:
+        assert 0.003 < (bt["ret"] < -bt[f"var_{m}"]).mean() < 0.02
+        assert (bt[f"es_{m}"] > bt[f"var_{m}"]).all()
+
+
+def test_dcc_follows_a_change_in_correlation():
+    # correlation 0.2 for 2000 days then 0.8: the DCC correlation should move from one to the other
+    def block(rho, n):
+        return rng.multivariate_normal([0, 0], [[1, rho], [rho, 1]], n)
+    Z = np.vstack([block(0.2, 2000), block(0.8, 2000)])
+    a, b = dcc_fit(Z)
+    r = dcc_filter(Z, a, b)[:-1, 0, 1]
+    assert a > 0 and a + b < 1
+    assert abs(r[1000:2000].mean() - 0.2) < 0.15 and abs(r[3000:].mean() - 0.8) < 0.1
+
+
+def test_t_copula_recovers_parameters():
+    C = np.array([[1, 0.5], [0.5, 1]])
+    X = stats.multivariate_t(shape=C, df=4).rvs(20_000, random_state=2)
+    rho, nu = t_copula_fit(X)
+    assert abs(rho - 0.5) < 0.03 and 3 < nu < 5.5
+
+
+def test_equal_risk_weights():
+    # asset 2 is twice as volatile and independent: it should get about a third of the money
+    S = np.column_stack([rng.normal(0, 0.01, 200_000), rng.normal(0, 0.02, 200_000)])
+    w = equal_risk_weights(S)
+    assert abs(w[1] - 1 / 3) < 0.03
+    assert np.allclose(es_contributions(S, w), 0.5, atol=0.01)
