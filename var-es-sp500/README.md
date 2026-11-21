@@ -22,6 +22,8 @@ Then I added Apple (data in `data/aapl.csv`) for a 50/50 portfolio. Their correl
 
 On the portfolio most models get caught in autumn 2008. A few still pass both tests over the full period. The best are the GARCH and GJR with skewed-t errors: 1.02% and 1.04% breaches, ES exact. The plain Student-t versions pass too (1.18%, 1.25% for GJR), and so does a DCC-GARCH version of FHS where the correlation moves every day (1.20%). The fitted t tails get through 2008 with 6 breaches, where the models built on the calm 2004-07 residuals have 14 to 18.
 
-Notebooks 01-02 are the S&P 500 part, 03-05 the portfolio. The GARCH and DCC likelihood fits, the EVT tail, the copula and the tests are written by hand in `risk.py` (tests in `test_risk.py`).
+Last thing, the 10-day horizon used by Basel (`06_ten_day_horizon`). Scaling the 1-day VaR by sqrt(10) is the usual shortcut. Simulating 10-day paths of the GJR skewed-t model instead gives a VaR 22% higher on average on the S&P 500, up to 70% higher in calm markets: the vol tends to rise back during the 10 days, and every bad day raises it for the next ones. On 576 non-overlapping 10-day periods the simulated VaR has 6 breaches for 5.8 expected, the sqrt(10) versions 9. With so few breaches the tests can't separate the models much, though.
 
-Things I'd still like to try: a 10-day horizon like Basel, more than two assets, and equal-risk weights recomputed every year instead of with hindsight.
+Notebooks 01-02 are the S&P 500 part, 03-05 the portfolio, 06 the 10-day horizon. The GARCH and DCC likelihood fits, the EVT tail, the copula and the tests are written by hand in `risk.py` (tests in `test_risk.py`).
+
+Things I'd still like to try: more than two assets, and equal-risk weights recomputed every year instead of with hindsight.

@@ -1,7 +1,7 @@
 import numpy as np
 import pandas as pd
 from scipy import stats
-from risk import gjr_skt_fit, skt_logpdf, skt_ppf, skt_var_es, garch_skt_fit, gjr_filter, gjr_t_fit, garch_t_fit, t_var_es, dcc_filter, dcc_fit, t_copula_fit, es_contributions, equal_risk_weights, portfolio_backtest, evt_tail, var_es_normal, var_es_hist, garch_filter, garch_fit, kupiec, christoffersen, backtest
+from risk import gjr_skt_paths, backtest_10d, gjr_skt_fit, skt_logpdf, skt_ppf, skt_var_es, garch_skt_fit, gjr_filter, gjr_t_fit, garch_t_fit, t_var_es, dcc_filter, dcc_fit, t_copula_fit, es_contributions, equal_risk_weights, portfolio_backtest, evt_tail, var_es_normal, var_es_hist, garch_filter, garch_fit, kupiec, christoffersen, backtest
 
 rng = np.random.default_rng(0)
 
@@ -167,3 +167,19 @@ def test_gjr_skt_recovers_parameters():
     o_h, a_h, g_h, b_h, eta_h, lam_h = gjr_skt_fit(r)
     assert abs(a_h - a) < 0.02 and abs(g_h - g) < 0.03 and abs(b_h - b) < 0.03
     assert 4.5 < eta_h < 8 and abs(lam_h - lam) < 0.05
+
+
+def test_10_day_paths_match_the_normal_case():
+    # no vol dynamics (a = g = b = 0) and a nearly normal skewed t: 10-day VaR = 2.326 * sigma * sqrt(10)
+    sig = 0.01
+    var, es = gjr_skt_paths((sig ** 2, 0, 0, 0, 200, 0.0), sig ** 2, 0.0, h=10, n=400_000)
+    assert abs(var / (2.326 * sig * np.sqrt(10)) - 1) < 0.02
+    assert abs(es / (2.665 * sig * np.sqrt(10)) - 1) < 0.03
+
+
+def test_backtest_10d_shapes():
+    r = pd.Series(simulate_garch(3000), index=pd.bdate_range("2000-01-03", periods=3000))
+    bt = backtest_10d(r, window=1000, refit=250, n_sims=2000)
+    assert len(bt) == 200 and not bt.isna().any().any()
+    for m in ["normal", "hist", "hist10", "sqrt", "mc"]:
+        assert (bt[f"es_{m}"] > bt[f"var_{m}"]).all()

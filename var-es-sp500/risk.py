@@ -347,3 +347,52 @@ def portfolio_backtest(R, w, alpha=0.99, window=1000, refit=250, lam=0.94):
     df = pd.DataFrame(out, index=R.index if hasattr(R, "index") else None)
     df.insert(0, "ret", np.log1p((np.exp(X) - 1) @ w))
     return df.iloc[window:]
+
+
+def gjr_skt_paths(params, s2_next, mu, h=10, alpha=0.99, n=20_000, rng=None):
+    # VaR / ES of the h-day log return, by simulating h days of GJR-GARCH with skewed-t shocks
+    # s2_next: variance forecast for the first day. the vol moves along each path
+    omega, a, g, b, eta, lam = params
+    rng = rng or np.random.default_rng(0)
+    s2 = np.full(n, s2_next)
+    total = np.zeros(n)
+    for _ in range(h):
+        x = np.sqrt(s2) * skt_ppf(rng.random(n), eta, lam)
+        total += mu + x
+        s2 = omega + (a + g * (x < 0)) * x ** 2 + b * s2
+    q = np.quantile(total, 1 - alpha)
+    return -q, -total[total <= q].mean()
+
+
+def backtest_10d(r, alpha=0.99, window=1000, refit=250, h=10, n_sims=20_000):
+    # h-day VaR / ES on non-overlapping h-day periods after the first `window` days
+    # sqrt rule: 1-day VaR scaled by sqrt(h). hist10: quantile of the past overlapping h-day returns.
+    # mc: h-day paths of GJR-GARCH skewed-t
+    import pandas as pd
+    v = r.values
+    rng = np.random.default_rng(0)
+    rows = []
+    for start in range(window, len(v) - h + 1, refit):
+        past = v[start - window:start]
+        mu = past.mean()
+        p = gjr_skt_fit(past)
+        end = min(start + refit, len(v) - h + 1)
+        s2 = gjr_filter(v[start - window:end] - mu, *p[:4])
+        one_var, one_es = skt_var_es(p[4], p[5], alpha)
+        for t in range(start, end):
+            if (t - window) % h:
+                continue
+            w = v[t - window:t]
+            sums = np.convolve(w, np.ones(h), "valid")    # overlapping h-day returns of the window
+            q10 = np.quantile(sums, 1 - alpha)
+            nv, ne = var_es_normal(w, alpha)
+            hv, he = var_es_hist(w, alpha)
+            st = np.sqrt(s2[t - start + window])
+            mv, me = gjr_skt_paths(p, s2[t - start + window], mu, h, alpha, n_sims, rng)
+            rows.append({"date": r.index[t], "ret": v[t:t + h].sum(),
+                         "var_normal": -h * mu + np.sqrt(h) * (nv + mu), "es_normal": -h * mu + np.sqrt(h) * (ne + mu),
+                         "var_hist": np.sqrt(h) * hv, "es_hist": np.sqrt(h) * he,
+                         "var_hist10": -q10, "es_hist10": -sums[sums <= q10].mean(),
+                         "var_sqrt": -h * mu + np.sqrt(h) * st * one_var, "es_sqrt": -h * mu + np.sqrt(h) * st * one_es,
+                         "var_mc": mv, "es_mc": me})
+    return pd.DataFrame(rows).set_index("date")
