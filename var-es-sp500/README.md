@@ -26,6 +26,8 @@ Last thing, the 10-day horizon used by Basel (`06_ten_day_horizon`). Scaling the
 
 Then seven assets (`07_seven_assets`): the S&P 500, Apple, Microsoft, JPMorgan, ExxonMobil, gold and long US Treasuries, from 2004 (when the gold ETF starts). The most interesting thing there is the bonds: from 2007 to 2021 they went up when stocks fell (correlation down to -0.7), and since 2022 the correlation is positive, so that hedge is mostly gone. With 1/7 in each asset, JPMorgan alone brings 28% of the ES and the bonds reduce it. Splitting the ES equally needs 44.5% in bonds and 17% in gold, and cuts the ES from 3.9% to 2.1% (5.2% for the S&P 500 alone), with a lower return. On the backtest from late 2008, most models land near 1% but have their breaches bunched in March 2020; only GJR skewed-t, FHS and GARCH-EVT pass both tests.
 
-Notebooks 01-02 are the S&P 500 part, 03-05 the two-asset portfolio, 06 the 10-day horizon, 07 the seven assets. The GARCH and DCC likelihood fits, the EVT tail, the copula and the tests are written by hand in `risk.py` (tests in `test_risk.py`).
+Notebooks 01-02 are the S&P 500 part, 03-05 the two-asset portfolio, 06 the 10-day horizon, 07 the seven assets, 08 the yearly weights. The GARCH and DCC likelihood fits, the EVT tail, the copula and the tests are written by hand in `risk.py` (tests in `test_risk.py`).
 
-Things I'd still like to try: equal-risk weights recomputed every year instead of with hindsight.
+Those equal-risk weights knew the whole period, so in `08_yearly_weights` I recompute them every January from the last 1000 days only. Hindsight turns out to matter little (ES 2.26% out of sample against 2.09%), but 2022 shows the weak spot: the weights set on 2018-2021 still put 47% in bonds, the bonds ended up bringing half of the risk, and the portfolio lost 17% that year, close to the S&P 500 (-19%) and twice the 1/7 portfolio. Its worst drawdown is 2022, where for the S&P 500 and 1/7 it is March 2020.
+
+Things I'd still like to try: a shorter window or DCC-based weights to react faster to a change like 2022, and transaction costs.

@@ -1,7 +1,7 @@
 import numpy as np
 import pandas as pd
 from scipy import stats
-from risk import gjr_skt_paths, backtest_10d, gjr_skt_fit, skt_logpdf, skt_ppf, skt_var_es, garch_skt_fit, gjr_filter, gjr_t_fit, garch_t_fit, t_var_es, dcc_filter, dcc_fit, t_copula_fit, es_contributions, equal_risk_weights, portfolio_backtest, evt_tail, var_es_normal, var_es_hist, garch_filter, garch_fit, kupiec, christoffersen, backtest
+from risk import rolling_equal_risk_weights, gjr_skt_paths, backtest_10d, gjr_skt_fit, skt_logpdf, skt_ppf, skt_var_es, garch_skt_fit, gjr_filter, gjr_t_fit, garch_t_fit, t_var_es, dcc_filter, dcc_fit, t_copula_fit, es_contributions, equal_risk_weights, portfolio_backtest, evt_tail, var_es_normal, var_es_hist, garch_filter, garch_fit, kupiec, christoffersen, backtest
 
 rng = np.random.default_rng(0)
 
@@ -197,3 +197,16 @@ def test_dcc_and_weights_with_three_assets():
     w = equal_risk_weights(S)
     assert (w > 0).all() and abs(w.sum() - 1) < 1e-9
     assert np.allclose(es_contributions(S, w), 1 / 3, atol=0.03)
+
+
+def test_rolling_weights_use_only_the_past():
+    # asset 2 is calm for 3 years then 4 times more volatile: its weight must only drop the year after the change
+    idx = pd.bdate_range("2000-01-03", periods=2000)
+    vol2 = np.where(idx < "2003-01-01", 0.01, 0.04)
+    S = pd.DataFrame({"a": rng.normal(0, 0.01, 2000), "b": rng.normal(0, 1, 2000) * vol2}, index=idx)
+    W = rolling_equal_risk_weights(S, window=500)
+    assert W.loc[:"2001-12-31"].isna().all().all()        # first year only after the window
+    assert np.allclose(W.dropna().sum(axis=1), 1)
+    assert W.loc["2002-06-03"].nunique() == 2 and abs(W.loc["2002-06-03", "b"] - 0.5) < 0.05   # same vol so far
+    assert W.loc["2004-06-01", "b"] < 0.3                    # the change is seen once it is in the past window
+    assert (W.loc["2003-01-02":"2003-12-31", "b"] == W.loc["2003-01-02", "b"]).all()   # held all year

@@ -315,6 +315,19 @@ def equal_risk_weights(S, alpha=0.99):
     return w / w.sum()
 
 
+def rolling_equal_risk_weights(S, window=1000, alpha=0.99):
+    # out of sample: on the first trading day of each year, equal-risk weights from the past `window` days only,
+    # then kept for the whole year. returns the daily weights (days x assets), NaN before the first year
+    import pandas as pd
+    S = pd.DataFrame(S)
+    W = pd.DataFrame(np.nan, index=S.index, columns=S.columns)
+    first_days = [i for i in range(window, len(S)) if S.index[i].year != S.index[i - 1].year]
+    for k, i in enumerate(first_days):
+        j = first_days[k + 1] if k + 1 < len(first_days) else len(S)
+        W.iloc[i:j] = equal_risk_weights(S.values[i - window:i], alpha)
+    return W
+
+
 def portfolio_backtest(R, w, alpha=0.99, window=1000, refit=250, lam=0.94):
     # two portfolio models on a matrix of daily log returns R (days x assets) with weights w:
     # - ewma: RiskMetrics covariance (lambda 0.94) and a normal VaR/ES
