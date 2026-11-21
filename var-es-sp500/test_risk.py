@@ -1,7 +1,7 @@
 import numpy as np
 import pandas as pd
 from scipy import stats
-from risk import garch_t_fit, t_var_es, dcc_filter, dcc_fit, t_copula_fit, es_contributions, equal_risk_weights, portfolio_backtest, evt_tail, var_es_normal, var_es_hist, garch_filter, garch_fit, kupiec, christoffersen, backtest
+from risk import gjr_filter, gjr_t_fit, garch_t_fit, t_var_es, dcc_filter, dcc_fit, t_copula_fit, es_contributions, equal_risk_weights, portfolio_backtest, evt_tail, var_es_normal, var_es_hist, garch_filter, garch_fit, kupiec, christoffersen, backtest
 
 rng = np.random.default_rng(0)
 
@@ -57,7 +57,7 @@ def test_backtest_on_garch_data():
     assert len(bt) == 2000 and not bt.isna().any().any()
     rate = (bt["ret"] < -bt["var_garch"]).mean()
     assert 0.003 < rate < 0.02    # close to 1% when the model is right
-    for m in ["normal", "hist", "garch", "fhs", "evt", "gt"]:
+    for m in ["normal", "hist", "garch", "fhs", "evt", "gt", "gjr"]:
         assert (bt[f"es_{m}"] >= bt[f"var_{m}"]).all()
 
 
@@ -115,3 +115,17 @@ def test_t_var_es_matches_simulation():
     var, es = t_var_es(5)
     q = np.quantile(x, 0.01)
     assert abs(var + q) < 0.01 and abs(es + x[x <= q].mean()) < 0.02
+
+
+def test_gjr_recovers_asymmetry():
+    n, omega, a, g, b, nu = 20_000, 2e-6, 0.02, 0.12, 0.9, 6
+    z = stats.t.rvs(nu, size=n, random_state=5) * np.sqrt((nu - 2) / nu)
+    r, s2 = np.empty(n), omega / (1 - a - g / 2 - b)
+    for t in range(n):
+        r[t] = np.sqrt(s2) * z[t]
+        s2 = omega + (a + g * (r[t] < 0)) * r[t] ** 2 + b * s2
+    o_hat, a_hat, g_hat, b_hat, nu_hat = gjr_t_fit(r)
+    assert abs(a_hat - a) < 0.02 and abs(g_hat - g) < 0.03 and abs(b_hat - b) < 0.03 and 4.5 < nu_hat < 8
+    # with g = 0 it is the plain GARCH filter
+    x = rng.normal(0, 0.01, 500)
+    assert np.allclose(gjr_filter(x, 1e-6, 0.1, 0.0, 0.85), garch_filter(x, 1e-6, 0.1, 0.85))
