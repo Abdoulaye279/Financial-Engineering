@@ -1,7 +1,7 @@
 import numpy as np
 import pandas as pd
 from scipy import stats
-from risk import gjr_filter, gjr_t_fit, garch_t_fit, t_var_es, dcc_filter, dcc_fit, t_copula_fit, es_contributions, equal_risk_weights, portfolio_backtest, evt_tail, var_es_normal, var_es_hist, garch_filter, garch_fit, kupiec, christoffersen, backtest
+from risk import skt_logpdf, skt_ppf, skt_var_es, garch_skt_fit, gjr_filter, gjr_t_fit, garch_t_fit, t_var_es, dcc_filter, dcc_fit, t_copula_fit, es_contributions, equal_risk_weights, portfolio_backtest, evt_tail, var_es_normal, var_es_hist, garch_filter, garch_fit, kupiec, christoffersen, backtest
 
 rng = np.random.default_rng(0)
 
@@ -57,7 +57,7 @@ def test_backtest_on_garch_data():
     assert len(bt) == 2000 and not bt.isna().any().any()
     rate = (bt["ret"] < -bt["var_garch"]).mean()
     assert 0.003 < rate < 0.02    # close to 1% when the model is right
-    for m in ["normal", "hist", "garch", "fhs", "evt", "gt", "gjr"]:
+    for m in ["normal", "hist", "garch", "fhs", "evt", "gt", "gjr", "skt"]:
         assert (bt[f"es_{m}"] >= bt[f"var_{m}"]).all()
 
 
@@ -129,3 +129,29 @@ def test_gjr_recovers_asymmetry():
     # with g = 0 it is the plain GARCH filter
     x = rng.normal(0, 0.01, 500)
     assert np.allclose(gjr_filter(x, 1e-6, 0.1, 0.0, 0.85), garch_filter(x, 1e-6, 0.1, 0.85))
+
+
+def test_skewed_t_is_a_standardised_density():
+    from scipy.integrate import quad
+    for eta, lam in [(5, -0.3), (8, 0.2), (30, 0.0)]:
+        f = lambda z: np.exp(skt_logpdf(np.array([z]), eta, lam))[0]
+        m0, m1, m2 = (quad(lambda z: z ** k * f(z), -np.inf, np.inf, limit=200)[0] for k in range(3))
+        assert abs(m0 - 1) < 1e-6 and abs(m1) < 1e-6 and abs(m2 - 1) < 1e-4
+        # ppf inverts the cdf and VaR / ES match a direct integration
+        q = skt_ppf(0.01, eta, lam)
+        assert abs(quad(f, -np.inf, q)[0] - 0.01) < 1e-7
+        var, es = skt_var_es(eta, lam)
+        assert abs(var + q) < 1e-12 and abs(es + quad(lambda z: z * f(z), -np.inf, q)[0] / 0.01) < 1e-6
+    # lam = 0 is the plain standardised t
+    assert abs(skt_var_es(6, 0.0)[0] - t_var_es(6)[0]) < 1e-10
+
+
+def test_garch_skt_recovers_parameters():
+    n, omega, a, b, eta, lam = 20_000, 2e-6, 0.08, 0.9, 6, -0.25
+    z = skt_ppf(np.random.default_rng(6).random(n), eta, lam)
+    r, s2 = np.empty(n), omega / (1 - a - b)
+    for t in range(n):
+        r[t] = np.sqrt(s2) * z[t]
+        s2 = omega + a * r[t] ** 2 + b * s2
+    o_hat, a_hat, b_hat, eta_hat, lam_hat = garch_skt_fit(r)
+    assert abs(a_hat - a) < 0.02 and abs(b_hat - b) < 0.03 and 4.5 < eta_hat < 8 and abs(lam_hat - lam) < 0.05

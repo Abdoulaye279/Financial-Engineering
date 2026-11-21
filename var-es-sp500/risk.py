@@ -66,6 +66,57 @@ def garch_t_fit(r):
     return omega / 1e4, a, b, nu
 
 
+def _skt_consts(eta, lam):
+    # Hansen (1994) skewed t, mean 0 and variance 1. lam < 0 -> heavier left tail
+    from scipy.special import gammaln
+    c = np.exp(gammaln((eta + 1) / 2) - gammaln(eta / 2)) / np.sqrt(np.pi * (eta - 2))
+    a = 4 * lam * c * (eta - 2) / (eta - 1)
+    b = np.sqrt(1 + 3 * lam ** 2 - a ** 2)
+    return a, b, c
+
+
+def skt_logpdf(z, eta, lam):
+    a, b, c = _skt_consts(eta, lam)
+    side = np.where(z < -a / b, 1 - lam, 1 + lam)
+    return np.log(b * c) - (eta + 1) / 2 * np.log1p(((b * z + a) / side) ** 2 / (eta - 2))
+
+
+def skt_ppf(p, eta, lam):
+    a, b, _ = _skt_consts(eta, lam)
+    s = np.sqrt((eta - 2) / eta)
+    p = np.asarray(p, dtype=float)
+    left = p < (1 - lam) / 2
+    x = np.where(left, stats.t.ppf(p / (1 - lam), eta), stats.t.ppf(0.5 + (p - (1 - lam) / 2) / (1 + lam), eta))
+    return (np.where(left, 1 - lam, 1 + lam) * s * x - a) / b
+
+
+def skt_var_es(eta, lam, alpha=0.99):
+    # VaR and ES (positive losses). on the left side z = ((1 - lam) s x - a) / b with x a plain t,
+    # so E[z ; z < q] comes from the t formula E[x ; x < xq] = -(eta + xq^2) / (eta - 1) * f(xq)
+    a, b, _ = _skt_consts(eta, lam)
+    p = 1 - alpha
+    s = np.sqrt((eta - 2) / eta)
+    xq = stats.t.ppf(p / (1 - lam), eta)
+    tail_x = -(eta + xq ** 2) / (eta - 1) * stats.t.pdf(xq, eta)
+    tail_z = (1 - lam) / b * ((1 - lam) * s * tail_x - a * p / (1 - lam))
+    return -skt_ppf(p, eta, lam), -tail_z / p
+
+
+def garch_skt_fit(r):
+    # GARCH(1,1) with Hansen skewed-t errors. returns omega, alpha, beta, eta, lam
+    x = 100 * (r - r.mean())
+
+    def nll(p):
+        s2 = garch_filter(x, *p[:3])[:-1]
+        return -np.sum(skt_logpdf(x / np.sqrt(s2), p[3], p[4]) - 0.5 * np.log(s2))
+
+    res = optimize.minimize(nll, [0.05 * x.var(), 0.08, 0.9, 8.0, -0.1], method="SLSQP",
+                            bounds=[(1e-8, None), (0, 1), (0, 1), (2.1, 100), (-0.99, 0.99)],
+                            constraints=[{"type": "ineq", "fun": lambda p: 0.9999 - p[1] - p[2]}])
+    omega, a, b, eta, lam = res.x
+    return omega / 1e4, a, b, eta, lam
+
+
 def gjr_filter(r, omega, a, g, b):
     # GJR-GARCH(1,1): a down day adds g * r^2 on top of a * r^2. same convention as garch_filter
     s2 = np.empty(len(r) + 1)
@@ -131,7 +182,7 @@ def backtest(r, alpha=0.99, window=1000, refit=250):
     import pandas as pd
     v = r.values
     out = {k: np.full(len(v), np.nan) for k in
-           ["var_normal", "es_normal", "var_hist", "es_hist", "var_garch", "es_garch", "var_fhs", "es_fhs", "var_evt", "es_evt", "var_gt", "es_gt", "var_gjr", "es_gjr"]}
+           ["var_normal", "es_normal", "var_hist", "es_hist", "var_garch", "es_garch", "var_fhs", "es_fhs", "var_evt", "es_evt", "var_gt", "es_gt", "var_gjr", "es_gjr", "var_skt", "es_skt"]}
     zq = stats.norm.ppf(1 - alpha)
     for start in range(window, len(v), refit):
         past = v[start - window:start]
@@ -150,6 +201,9 @@ def backtest(r, alpha=0.99, window=1000, refit=250):
         o_j, a_j, g_j, b_j, nu_j = gjr_t_fit(past)
         s_j = np.sqrt(gjr_filter(block, o_j, a_j, g_j, b_j))
         j_var, j_es = t_var_es(nu_j, alpha)
+        o_k, a_k, b_k, eta_k, lam_k = garch_skt_fit(past)
+        s_k = np.sqrt(garch_filter(block, o_k, a_k, b_k))
+        k_var, k_es = skt_var_es(eta_k, lam_k, alpha)
         for t in range(start, min(start + refit, len(v))):
             w = v[t - window:t]
             out["var_normal"][t], out["es_normal"][t] = var_es_normal(w, alpha)
@@ -165,6 +219,8 @@ def backtest(r, alpha=0.99, window=1000, refit=250):
             out["es_gt"][t] = -mu + s_t[t - start + window] * t_es
             out["var_gjr"][t] = -mu + s_j[t - start + window] * j_var
             out["es_gjr"][t] = -mu + s_j[t - start + window] * j_es
+            out["var_skt"][t] = -mu + s_k[t - start + window] * k_var
+            out["es_skt"][t] = -mu + s_k[t - start + window] * k_es
     df = pd.DataFrame(out, index=r.index)
     df.insert(0, "ret", v)
     return df.iloc[window:]
