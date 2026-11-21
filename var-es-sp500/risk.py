@@ -49,6 +49,32 @@ def garch_fit(r):
     return omega / 1e4, a, b
 
 
+def garch_t_fit(r):
+    # GARCH(1,1) with standardised Student-t errors, maximum likelihood. returns omega, alpha, beta, nu
+    from scipy.special import gammaln
+    x = 100 * (r - r.mean())
+
+    def nll(p):
+        omega, a, b, nu = p
+        s2 = garch_filter(x, omega, a, b)[:-1]
+        return -np.sum(gammaln((nu + 1) / 2) - gammaln(nu / 2) - 0.5 * np.log(np.pi * (nu - 2) * s2)
+                       - (nu + 1) / 2 * np.log1p(x ** 2 / ((nu - 2) * s2)))
+
+    res = optimize.minimize(nll, [0.05 * x.var(), 0.08, 0.9, 8.0], method="SLSQP",
+                            bounds=[(1e-8, None), (0, 1), (0, 1), (2.1, 100)],
+                            constraints=[{"type": "ineq", "fun": lambda p: 0.9999 - p[1] - p[2]}])
+    omega, a, b, nu = res.x
+    return omega / 1e4, a, b, nu
+
+
+def t_var_es(nu, alpha=0.99):
+    # VaR and ES (positive losses) of a Student-t rescaled to variance 1
+    k = np.sqrt((nu - 2) / nu)
+    q = stats.t.ppf(1 - alpha, nu)
+    es = stats.t.pdf(q, nu) / (1 - alpha) * (nu + q ** 2) / (nu - 1)
+    return -q * k, es * k
+
+
 def evt_tail(losses, alpha=0.99, tail=0.1):
     # fit a generalized Pareto distribution to the largest 10% of losses (peaks over threshold)
     # and use it for the VaR and ES quantile instead of the empirical one
@@ -87,7 +113,7 @@ def backtest(r, alpha=0.99, window=1000, refit=250):
     import pandas as pd
     v = r.values
     out = {k: np.full(len(v), np.nan) for k in
-           ["var_normal", "es_normal", "var_hist", "es_hist", "var_garch", "es_garch", "var_fhs", "es_fhs", "var_evt", "es_evt"]}
+           ["var_normal", "es_normal", "var_hist", "es_hist", "var_garch", "es_garch", "var_fhs", "es_fhs", "var_evt", "es_evt", "var_gt", "es_gt"]}
     zq = stats.norm.ppf(1 - alpha)
     for start in range(window, len(v), refit):
         past = v[start - window:start]
@@ -100,6 +126,9 @@ def backtest(r, alpha=0.99, window=1000, refit=250):
         q = np.quantile(z, 1 - alpha)
         z_tail = z[z <= q].mean()
         evt_var, evt_es = evt_tail(-z, alpha)
+        o_t, a_t, b_t, nu = garch_t_fit(past)
+        s_t = np.sqrt(garch_filter(block, o_t, a_t, b_t))
+        t_var, t_es = t_var_es(nu, alpha)
         for t in range(start, min(start + refit, len(v))):
             w = v[t - window:t]
             out["var_normal"][t], out["es_normal"][t] = var_es_normal(w, alpha)
@@ -111,6 +140,8 @@ def backtest(r, alpha=0.99, window=1000, refit=250):
             out["es_fhs"][t] = -(mu + st * z_tail)
             out["var_evt"][t] = -mu + st * evt_var
             out["es_evt"][t] = -mu + st * evt_es
+            out["var_gt"][t] = -mu + s_t[t - start + window] * t_var
+            out["es_gt"][t] = -mu + s_t[t - start + window] * t_es
     df = pd.DataFrame(out, index=r.index)
     df.insert(0, "ret", v)
     return df.iloc[window:]
