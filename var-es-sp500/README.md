@@ -24,6 +24,8 @@ On the portfolio most models get caught in autumn 2008. A few still pass both te
 
 Last thing, the 10-day horizon used by Basel (`06_ten_day_horizon`). Scaling the 1-day VaR by sqrt(10) is the usual shortcut. Simulating 10-day paths of the GJR skewed-t model instead gives a VaR 22% higher on average on the S&P 500, up to 70% higher in calm markets: the vol tends to rise back during the 10 days, and every bad day raises it for the next ones. On 576 non-overlapping 10-day periods the simulated VaR has 6 breaches for 5.8 expected, the sqrt(10) versions 9. With so few breaches the tests can't separate the models much, though.
 
-Notebooks 01-02 are the S&P 500 part, 03-05 the portfolio, 06 the 10-day horizon. The GARCH and DCC likelihood fits, the EVT tail, the copula and the tests are written by hand in `risk.py` (tests in `test_risk.py`).
+Then seven assets (`07_seven_assets`): the S&P 500, Apple, Microsoft, JPMorgan, ExxonMobil, gold and long US Treasuries, from 2004 (when the gold ETF starts). The most interesting thing there is the bonds: from 2007 to 2021 they went up when stocks fell (correlation down to -0.7), and since 2022 the correlation is positive, so that hedge is mostly gone. With 1/7 in each asset, JPMorgan alone brings 28% of the ES and the bonds reduce it. Splitting the ES equally needs 44.5% in bonds and 17% in gold, and cuts the ES from 3.9% to 2.1% (5.2% for the S&P 500 alone), with a lower return. On the backtest from late 2008, most models land near 1% but have their breaches bunched in March 2020; only GJR skewed-t, FHS and GARCH-EVT pass both tests.
 
-Things I'd still like to try: more than two assets, and equal-risk weights recomputed every year instead of with hindsight.
+Notebooks 01-02 are the S&P 500 part, 03-05 the two-asset portfolio, 06 the 10-day horizon, 07 the seven assets. The GARCH and DCC likelihood fits, the EVT tail, the copula and the tests are written by hand in `risk.py` (tests in `test_risk.py`).
+
+Things I'd still like to try: equal-risk weights recomputed every year instead of with hindsight.
