@@ -183,3 +183,17 @@ def test_backtest_10d_shapes():
     assert len(bt) == 200 and not bt.isna().any().any()
     for m in ["normal", "hist", "hist10", "sqrt", "mc"]:
         assert (bt[f"es_{m}"] > bt[f"var_{m}"]).all()
+
+
+def test_dcc_and_weights_with_three_assets():
+    # 3 assets, the third one moves against the first two on bad days (like bonds)
+    C = np.array([[1, 0.6, -0.3], [0.6, 1, -0.3], [-0.3, -0.3, 1]])
+    Z = rng.multivariate_normal(np.zeros(3), C, 4000)
+    a, b = dcc_fit(Z)
+    R = dcc_filter(Z, a, b)
+    assert R.shape == (4001, 3, 3) and np.allclose(R[:, range(3), range(3)], 1)
+    assert np.allclose(R[-1], C, atol=0.15)
+    S = Z * np.array([0.01, 0.02, 0.005])
+    w = equal_risk_weights(S)
+    assert (w > 0).all() and abs(w.sum() - 1) < 1e-9
+    assert np.allclose(es_contributions(S, w), 1 / 3, atol=0.03)

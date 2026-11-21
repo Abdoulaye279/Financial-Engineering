@@ -247,11 +247,11 @@ def backtest(r, alpha=0.99, window=1000, refit=250):
 
 
 def dcc_filter(Z, a, b):
-    # DCC(1,1) correlations from standardised residuals Z (days x 2); out[t] uses Z up to t-1,
+    # DCC(1,1) correlation matrices from standardised residuals Z (days x assets); out[t] uses Z up to t-1,
     # the last one is the forecast for the next day
     Qbar = np.corrcoef(Z.T)
     Q = Qbar.copy()
-    out = np.empty((len(Z) + 1, 2, 2))
+    out = np.empty((len(Z) + 1,) + Qbar.shape)
     for t in range(len(Z) + 1):
         d = np.sqrt(np.diag(Q))
         out[t] = Q / np.outer(d, d)
@@ -261,15 +261,15 @@ def dcc_filter(Z, a, b):
 
 
 def dcc_fit(Z):
-    # maximum likelihood of the correlation part of a DCC(1,1), for 2 assets
+    # maximum likelihood of the correlation part of a DCC(1,1)
     def nll(p):
         a, b = p
         if a < 0 or b < 0 or a + b >= 0.999:
             return 1e10
-        r = dcc_filter(Z, a, b)[:-1, 0, 1]
-        det = 1 - r ** 2
-        q = (Z[:, 0] ** 2 - 2 * r * Z[:, 0] * Z[:, 1] + Z[:, 1] ** 2) / det
-        return 0.5 * np.sum(np.log(det) + q - (Z ** 2).sum(axis=1))
+        R = dcc_filter(Z, a, b)[:-1]
+        logdet = np.linalg.slogdet(R)[1]
+        q = np.einsum("ti,ti->t", Z, np.linalg.solve(R, Z[..., None])[..., 0])
+        return 0.5 * np.sum(logdet + q - (Z ** 2).sum(axis=1))
     return optimize.minimize(nll, [0.03, 0.95], method="Nelder-Mead").x
 
 
@@ -296,9 +296,23 @@ def es_contributions(S, w, alpha=0.99):
 
 
 def equal_risk_weights(S, alpha=0.99):
-    # 2 assets: weight of the second asset so that both bring half of the ES
-    w2 = optimize.brentq(lambda x: es_contributions(S, [1 - x, x], alpha)[1] - 0.5, 0.01, 0.99)
-    return np.array([1 - w2, w2])
+    # weights where every asset brings the same share of the historical ES (risk budgeting, Bruder & Roncalli):
+    # minimise ES(w) - c * sum(log w). the log keeps all weights positive and the optimum has equal contributions,
+    # even when an asset gains on the bad days (bonds, gold) and would have a negative contribution at equal weights
+    S = np.asarray(S)
+    n = S.shape[1]
+
+    def es(w):
+        p = S @ w
+        return -p[p <= np.quantile(p, 1 - alpha)].mean()
+
+    w0 = 1 / S.std(axis=0)
+    w0 /= w0.sum()
+    c = es(w0) / n
+    res = optimize.minimize(lambda y: es(np.exp(y)) - c * y.sum(), np.log(w0), method="Nelder-Mead",
+                            options={"xatol": 1e-6, "fatol": 1e-10, "maxiter": 20000 * n})
+    w = np.exp(res.x)
+    return w / w.sum()
 
 
 def portfolio_backtest(R, w, alpha=0.99, window=1000, refit=250, lam=0.94):
@@ -307,7 +321,7 @@ def portfolio_backtest(R, w, alpha=0.99, window=1000, refit=250, lam=0.94):
     # - mfhs: one GARCH per asset, then the past vectors of standardised residuals are
     #   rescaled by today's volatilities and turned into portfolio returns (keeps the joint tails)
     # - dcc: same as mfhs, but the residuals are first decorrelated with their own DCC correlation
-    #   and then given today's DCC correlation, so the dependence also changes every day (2 assets)
+    #   and then given today's DCC correlation, so the dependence also changes every day
     import pandas as pd
     X, w = np.asarray(R), np.asarray(w)
     T, n = X.shape
@@ -327,23 +341,19 @@ def portfolio_backtest(R, w, alpha=0.99, window=1000, refit=250, lam=0.94):
         for i in range(n):
             sig[:, i] = np.sqrt(garch_filter(X[start - window:end, i] - mu[i], *garch_fit(past[:, i]))[:-1])
         Z = (past - mu) / sig[:window]
-        if n == 2:
-            a, b = dcc_fit(Z)
-            Zall = (X[start - window:end] - mu) / sig
-            Rt = dcc_filter(Zall, a, b)
-            # remove each past day's own correlation (Cholesky), leaving uncorrelated shocks
-            E = np.array([np.linalg.solve(np.linalg.cholesky(Rt[s]), Z[s]) for s in range(window)])
+        a, b = dcc_fit(Z)
+        Rt = dcc_filter((X[start - window:end] - mu) / sig, a, b)
+        # remove each past day's own correlation (Cholesky), leaving uncorrelated shocks
+        E = np.array([np.linalg.solve(np.linalg.cholesky(Rt[s]), Z[s]) for s in range(window)])
         for t in range(start, end):
             st = sig[t - start + window]
             port = np.log1p((np.exp(mu + Z * st) - 1) @ w)
             q = np.quantile(port, 1 - alpha)
             out["var_mfhs"][t], out["es_mfhs"][t] = -q, -port[port <= q].mean()
-            if n == 2:
-                Zt = E @ np.linalg.cholesky(Rt[t - start + window]).T   # give today's correlation
-                port = np.log1p((np.exp(mu + Zt * st) - 1) @ w)
-                q = np.quantile(port, 1 - alpha)
-                out["var_dcc"][t], out["es_dcc"][t] = -q, -port[port <= q].mean()
-    out = {k: v for k, v in out.items() if n == 2 or "dcc" not in k}
+            Zt = E @ np.linalg.cholesky(Rt[t - start + window]).T   # give today's correlation
+            port = np.log1p((np.exp(mu + Zt * st) - 1) @ w)
+            q = np.quantile(port, 1 - alpha)
+            out["var_dcc"][t], out["es_dcc"][t] = -q, -port[port <= q].mean()
     df = pd.DataFrame(out, index=R.index if hasattr(R, "index") else None)
     df.insert(0, "ret", np.log1p((np.exp(X) - 1) @ w))
     return df.iloc[window:]
