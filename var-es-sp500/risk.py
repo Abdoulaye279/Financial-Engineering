@@ -155,6 +155,21 @@ def evt_tail(losses, alpha=0.99, tail=0.1):
     return var, es
 
 
+def gjr_skt_fit(r):
+    # GJR-GARCH(1,1) with Hansen skewed-t errors. returns omega, alpha, gamma, beta, eta, lam
+    x = 100 * (r - r.mean())
+
+    def nll(p):
+        s2 = gjr_filter(x, *p[:4])[:-1]
+        return -np.sum(skt_logpdf(x / np.sqrt(s2), p[4], p[5]) - 0.5 * np.log(s2))
+
+    res = optimize.minimize(nll, [0.05 * x.var(), 0.03, 0.08, 0.9, 8.0, -0.1], method="SLSQP",
+                            bounds=[(1e-8, None), (0, 1), (0, 1), (0, 1), (2.1, 100), (-0.99, 0.99)],
+                            constraints=[{"type": "ineq", "fun": lambda p: 0.9999 - p[1] - p[2] / 2 - p[3]}])
+    omega, a, g, b, eta, lam = res.x
+    return omega / 1e4, a, g, b, eta, lam
+
+
 def kupiec(breaches, alpha=0.99):
     # is the breach rate equal to 1 - alpha? returns LR stat and p-value
     T, x, p = len(breaches), breaches.sum(), 1 - alpha
@@ -182,7 +197,7 @@ def backtest(r, alpha=0.99, window=1000, refit=250):
     import pandas as pd
     v = r.values
     out = {k: np.full(len(v), np.nan) for k in
-           ["var_normal", "es_normal", "var_hist", "es_hist", "var_garch", "es_garch", "var_fhs", "es_fhs", "var_evt", "es_evt", "var_gt", "es_gt", "var_gjr", "es_gjr", "var_skt", "es_skt"]}
+           ["var_normal", "es_normal", "var_hist", "es_hist", "var_garch", "es_garch", "var_fhs", "es_fhs", "var_evt", "es_evt", "var_gt", "es_gt", "var_gjr", "es_gjr", "var_skt", "es_skt", "var_gjrskt", "es_gjrskt"]}
     zq = stats.norm.ppf(1 - alpha)
     for start in range(window, len(v), refit):
         past = v[start - window:start]
@@ -204,6 +219,9 @@ def backtest(r, alpha=0.99, window=1000, refit=250):
         o_k, a_k, b_k, eta_k, lam_k = garch_skt_fit(past)
         s_k = np.sqrt(garch_filter(block, o_k, a_k, b_k))
         k_var, k_es = skt_var_es(eta_k, lam_k, alpha)
+        o_m, a_m, g_m, b_m, eta_m, lam_m = gjr_skt_fit(past)
+        s_m = np.sqrt(gjr_filter(block, o_m, a_m, g_m, b_m))
+        m_var, m_es = skt_var_es(eta_m, lam_m, alpha)
         for t in range(start, min(start + refit, len(v))):
             w = v[t - window:t]
             out["var_normal"][t], out["es_normal"][t] = var_es_normal(w, alpha)
@@ -221,6 +239,8 @@ def backtest(r, alpha=0.99, window=1000, refit=250):
             out["es_gjr"][t] = -mu + s_j[t - start + window] * j_es
             out["var_skt"][t] = -mu + s_k[t - start + window] * k_var
             out["es_skt"][t] = -mu + s_k[t - start + window] * k_es
+            out["var_gjrskt"][t] = -mu + s_m[t - start + window] * m_var
+            out["es_gjrskt"][t] = -mu + s_m[t - start + window] * m_es
     df = pd.DataFrame(out, index=r.index)
     df.insert(0, "ret", v)
     return df.iloc[window:]
